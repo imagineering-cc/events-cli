@@ -1,0 +1,30 @@
+{
+  "name": "events-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for managing Meetup and Luma events via Playwright",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "meetup",
+    "luma",
+    "events",
+    "playwright"
+  ],
+  "author": "imagineering-cc",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "playwright": "^1.58.2",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "typescript": "^5.9.3"
+  }
+}
