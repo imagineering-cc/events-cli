@@ -16,13 +16,60 @@ const PLATFORM_URLS: Record<Platform, string> = {
 };
 
 /**
+ * In-process mutex for serialising browser operations.
+ *
+ * MCP hosts (e.g. Claude Code) can fire multiple tool calls concurrently.
+ * Playwright browser contexts are not safe for concurrent use — simultaneous
+ * operations on the same context corrupt state. This mutex ensures only one
+ * tool call touches the browser at a time; others queue up and wait.
+ *
+ * Hat-tip to @m13v's browser-lock for surfacing this concurrency pattern.
+ * His implementation uses filesystem locks for cross-process safety; ours
+ * is in-process because the MCP server is a single Node process handling
+ * serialised stdio, but the principle is identical.
+ */
+class BrowserMutex {
+  private queue: Array<() => void> = [];
+  private locked = false;
+
+  /** Acquire the mutex. Resolves when it's your turn. */
+  acquire(): Promise<void> {
+    if (!this.locked) {
+      this.locked = true;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => this.queue.push(resolve));
+  }
+
+  /** Release the mutex, allowing the next waiter to proceed. */
+  release(): void {
+    const next = this.queue.shift();
+    if (next) {
+      next();
+    } else {
+      this.locked = false;
+    }
+  }
+}
+
+/**
  * Manages a shared Playwright browser instance with per-platform
  * session persistence. Sessions (cookies + localStorage) are saved
  * to disk so users only need to log in once.
+ *
+ * Key safety properties:
+ * - All browser operations are serialised through a mutex to prevent
+ *   concurrent tool calls from corrupting shared state.
+ * - Saved sessions are validated on first use (not blindly trusted),
+ *   so stale tokens from server-side invalidation are caught early.
+ * - storageState() is always flushed before any context/browser close.
  */
 class BrowserManager {
   private browser: Browser | null = null;
   private contexts: Map<Platform, BrowserContext> = new Map();
+  private mutex = new BrowserMutex();
+  /** Tracks which platforms have been validated this process lifetime. */
+  private validated: Set<Platform> = new Set();
 
   constructor() {
     if (!existsSync(DATA_DIR)) {
@@ -46,6 +93,11 @@ class BrowserManager {
   /**
    * Get a browser context for a platform, restoring saved session
    * state if available.
+   *
+   * On the first call per platform (per process lifetime), validates
+   * that a restored session is still accepted by the remote server.
+   * This catches the case where the server invalidated the session
+   * but the local file still has stale tokens.
    */
   async getContext(platform: Platform): Promise<BrowserContext> {
     const existing = this.contexts.get(platform);
@@ -58,6 +110,21 @@ class BrowserManager {
     if (existsSync(sessionFile)) {
       const state = JSON.parse(await readFile(sessionFile, "utf-8"));
       context = await browser.newContext({ storageState: state });
+
+      // Validate the restored session once per process lifetime.
+      // A quick page load + login-indicator check catches stale tokens
+      // before they cause confusing failures deep in a tool call.
+      if (!this.validated.has(platform)) {
+        const valid = await this.checkSessionInContext(context, platform);
+        this.validated.add(platform);
+        if (!valid) {
+          await context.close();
+          await rm(sessionFile);
+          // Return a fresh (unauthenticated) context — the tool handler
+          // will see the user isn't logged in and prompt for login.
+          context = await browser.newContext();
+        }
+      }
     } else {
       context = await browser.newContext();
     }
@@ -66,10 +133,69 @@ class BrowserManager {
     return context;
   }
 
+  /**
+   * Check whether a context's session is still valid by loading the
+   * platform and looking for login indicators.
+   */
+  private async checkSessionInContext(
+    context: BrowserContext,
+    platform: Platform,
+  ): Promise<boolean> {
+    try {
+      const page = await context.newPage();
+      await page.goto(PLATFORM_URLS[platform], {
+        waitUntil: "domcontentloaded",
+        timeout: 15_000,
+      });
+
+      let loggedIn: boolean;
+      if (platform === "meetup") {
+        loggedIn = (await page.locator('a[href*="login"]').count()) === 0;
+      } else {
+        loggedIn = (await page.getByText("Sign In").count()) === 0;
+      }
+
+      await page.close();
+      return loggedIn;
+    } catch {
+      return false;
+    }
+  }
+
   /** Get a new page for a platform. */
   async getPage(platform: Platform): Promise<Page> {
     const context = await this.getContext(platform);
     return context.newPage();
+  }
+
+  /**
+   * Run a callback with exclusive access to a browser page.
+   *
+   * Acquires the mutex before creating the page and releases it after
+   * the callback completes (or throws). Session state is automatically
+   * flushed to disk after each operation so that a crash never loses
+   * auth state.
+   *
+   * All tool handlers should use this instead of calling getPage()
+   * directly, to guarantee serialised access.
+   */
+  async withBrowser<T>(
+    platform: Platform,
+    fn: (page: Page) => Promise<T>,
+  ): Promise<T> {
+    await this.mutex.acquire();
+    try {
+      const page = await this.getPage(platform);
+      try {
+        const result = await fn(page);
+        return result;
+      } finally {
+        await page.close();
+        await this.saveSession(platform);
+      }
+    } finally {
+      this.mutex.release();
+    }
   }
 
   /** Save the current session state for a platform to disk. */
@@ -152,34 +278,44 @@ class BrowserManager {
   async isSessionValid(platform: Platform): Promise<boolean> {
     if (!this.hasSession(platform)) return false;
 
+    const context = this.contexts.get(platform);
+    if (context) {
+      return this.checkSessionInContext(context, platform);
+    }
+
+    // No live context — create a temporary one from saved state
     try {
-      const page = await this.getPage(platform);
-      await page.goto(PLATFORM_URLS[platform], { waitUntil: "domcontentloaded" });
-
-      let loggedIn: boolean;
-      if (platform === "meetup") {
-        // Meetup shows a "Log in" button when not authenticated
-        loggedIn = (await page.locator('a[href*="login"]').count()) === 0;
-      } else {
-        // Luma shows "Sign In" when not authenticated
-        loggedIn = (await page.getByText("Sign In").count()) === 0;
-      }
-
-      await page.close();
-      return loggedIn;
+      const browser = await this.ensureBrowser();
+      const state = JSON.parse(
+        await readFile(this.sessionPath(platform), "utf-8"),
+      );
+      const tempContext = await browser.newContext({ storageState: state });
+      const valid = await this.checkSessionInContext(tempContext, platform);
+      await tempContext.close();
+      return valid;
     } catch {
       return false;
     }
   }
 
-  /** Shut down browser and all contexts. */
+  /**
+   * Shut down browser and all contexts.
+   *
+   * Critical ordering: storageState() MUST be called while the context
+   * is still alive. Calling it after browser.close() returns nothing.
+   */
   async shutdown(): Promise<void> {
-    for (const [platform, context] of this.contexts) {
+    // First: flush all session state while contexts are still alive
+    for (const [platform] of this.contexts) {
       await this.saveSession(platform);
+    }
+    // Then: close contexts
+    for (const [, context] of this.contexts) {
       await context.close();
     }
     this.contexts.clear();
 
+    // Finally: close the browser
     if (this.browser) {
       await this.browser.close();
       this.browser = null;
