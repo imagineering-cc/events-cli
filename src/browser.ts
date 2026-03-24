@@ -136,6 +136,10 @@ class BrowserManager {
   /**
    * Check whether a context's session is still valid by loading the
    * platform and looking for login indicators.
+   *
+   * Uses a tight timeout (5s) so a slow network doesn't block tool
+   * startup. On timeout, assumes the session is invalid — better to
+   * re-auth than to hang.
    */
   private async checkSessionInContext(
     context: BrowserContext,
@@ -145,7 +149,7 @@ class BrowserManager {
       const page = await context.newPage();
       await page.goto(PLATFORM_URLS[platform], {
         waitUntil: "domcontentloaded",
-        timeout: 15_000,
+        timeout: 5_000,
       });
 
       let loggedIn: boolean;
