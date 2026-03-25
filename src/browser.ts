@@ -180,33 +180,55 @@ class BrowserManager {
     return existsSync(this.sessionPath(platform));
   }
 
-  /** Clear saved session for a platform. */
+  /**
+   * Clear saved session for a platform.
+   *
+   * Acquires the mutex to avoid closing a context that another
+   * tool call is actively using.
+   */
   async clearSession(platform: Platform): Promise<void> {
-    const sessionFile = this.sessionPath(platform);
-    if (existsSync(sessionFile)) {
-      await rm(sessionFile);
-    }
+    await this.mutex.acquire();
+    try {
+      const sessionFile = this.sessionPath(platform);
+      if (existsSync(sessionFile)) {
+        await rm(sessionFile);
+      }
 
-    const context = this.contexts.get(platform);
-    if (context) {
-      await context.close();
-      this.contexts.delete(platform);
+      const context = this.contexts.get(platform);
+      if (context) {
+        await context.close();
+        this.contexts.delete(platform);
+      }
+    } finally {
+      this.mutex.release();
     }
   }
 
   /**
    * Open a visible browser for the user to log in manually.
    * Saves the session once they're done.
+   *
+   * Acquires the mutex before touching the context map so an
+   * in-flight tool call isn't left with a closed context.
+   * The mutex is released before the 5-minute login wait so
+   * other platforms can still be used while the user logs in.
    */
   async interactiveLogin(platform: Platform): Promise<string> {
-    // Close any existing headless context for this platform
-    const existing = this.contexts.get(platform);
-    if (existing) {
-      await existing.close();
-      this.contexts.delete(platform);
+    // Acquire mutex to safely close the existing context
+    await this.mutex.acquire();
+    try {
+      const existing = this.contexts.get(platform);
+      if (existing) {
+        await this.saveSession(platform);
+        await existing.close();
+        this.contexts.delete(platform);
+      }
+    } finally {
+      this.mutex.release();
     }
 
-    // Launch a headed (visible) browser for the user to interact with
+    // Launch a headed (visible) browser for the user to interact with.
+    // This uses a separate browser instance so the mutex isn't needed.
     const headedBrowser = await chromium.launch({ headless: false });
     const context = await headedBrowser.newContext();
     const page = await context.newPage();
@@ -238,6 +260,9 @@ class BrowserManager {
     );
 
     await headedBrowser.close();
+
+    // Reset validation so the new session gets checked on next use
+    this.validated.delete(platform);
 
     return `Logged in to ${platform} successfully. Session saved.`;
   }
