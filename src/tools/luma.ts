@@ -8,9 +8,7 @@ export const lumaListEventsTool = {
     "List upcoming events from your Luma dashboard. Requires being logged in to Luma.",
   schema: {},
   handler: async () => {
-    const page = await browser.getPage("luma");
-
-    try {
+    return browser.withBrowser("luma", async (page) => {
       await page.goto("https://lu.ma/home", {
         waitUntil: "domcontentloaded",
       });
@@ -46,9 +44,7 @@ export const lumaListEventsTool = {
       }
 
       return JSON.stringify(events, null, 2);
-    } finally {
-      await page.close();
-    }
+    });
   },
 };
 
@@ -80,9 +76,7 @@ export const lumaCreateEventTool = {
     endDate?: string;
     location?: string;
   }) => {
-    const page = await browser.getPage("luma");
-
-    try {
+    return browser.withBrowser("luma", async (page) => {
       await page.goto("https://lu.ma/create", {
         waitUntil: "domcontentloaded",
       });
@@ -161,9 +155,7 @@ export const lumaCreateEventTool = {
 
       const finalUrl = page.url();
       return `Event created on Luma: ${finalUrl}`;
-    } finally {
-      await page.close();
-    }
+    });
   },
 };
 
@@ -175,9 +167,7 @@ export const lumaGetRsvpsTool = {
     eventUrl: z.string().describe("Full URL of the Luma event"),
   },
   handler: async ({ eventUrl }: { eventUrl: string }) => {
-    const page = await browser.getPage("luma");
-
-    try {
+    return browser.withBrowser("luma", async (page) => {
       await page.goto(eventUrl, { waitUntil: "domcontentloaded" });
       await page.waitForTimeout(2000);
 
@@ -205,8 +195,6 @@ export const lumaGetRsvpsTool = {
       }
 
       return JSON.stringify({ count: guests.length, guests }, null, 2);
-    } finally {
-      await page.close();
-    }
+    });
   },
 };
