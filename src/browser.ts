@@ -130,8 +130,8 @@ class BrowserManager {
     }
   }
 
-  /** Get a new page for a platform. */
-  async getPage(platform: Platform): Promise<Page> {
+  /** Get a new page for a platform. Internal — use `withBrowser` instead. */
+  private async getPage(platform: Platform): Promise<Page> {
     const context = await this.getContext(platform);
     return context.newPage();
   }

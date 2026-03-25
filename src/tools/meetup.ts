@@ -12,9 +12,7 @@ export const meetupListEventsTool = {
       .describe("Meetup group URL name (e.g. 'imagineeering-ai-claude-code')"),
   },
   handler: async ({ groupUrlName }: { groupUrlName: string }) => {
-    const page = await browser.getPage("meetup");
-
-    try {
+    return browser.withBrowser("meetup", async (page) => {
       await page.goto(`https://www.meetup.com/${groupUrlName}/events/`, {
         waitUntil: "domcontentloaded",
       });
@@ -44,9 +42,7 @@ export const meetupListEventsTool = {
       }
 
       return JSON.stringify(events, null, 2);
-    } finally {
-      await page.close();
-    }
+    });
   },
 };
 
@@ -90,9 +86,7 @@ export const meetupCreateEventTool = {
     venueName?: string;
     publish?: boolean;
   }) => {
-    const page = await browser.getPage("meetup");
-
-    try {
+    return browser.withBrowser("meetup", async (page) => {
       // Navigate to event creation page
       await page.goto(
         `https://www.meetup.com/${groupUrlName}/events/create/`,
@@ -165,9 +159,7 @@ export const meetupCreateEventTool = {
 
       const finalUrl = page.url();
       return `Event ${publish ? "published" : "saved as draft"}: ${finalUrl}`;
-    } finally {
-      await page.close();
-    }
+    });
   },
 };
 
@@ -179,9 +171,7 @@ export const meetupGetRsvpsTool = {
     eventUrl: z.string().describe("Full URL of the Meetup event"),
   },
   handler: async ({ eventUrl }: { eventUrl: string }) => {
-    const page = await browser.getPage("meetup");
-
-    try {
+    return browser.withBrowser("meetup", async (page) => {
       // Navigate to the event's attendees page
       const attendeesUrl = eventUrl.replace(/\/?$/, "/attendees/");
       await page.goto(attendeesUrl, { waitUntil: "domcontentloaded" });
@@ -209,8 +199,6 @@ export const meetupGetRsvpsTool = {
         null,
         2
       );
-    } finally {
-      await page.close();
-    }
+    });
   },
 };

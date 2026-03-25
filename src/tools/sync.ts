@@ -52,21 +52,13 @@ export const syncEventTool = {
       return "groupUrlName is required when syncing to Meetup.";
     }
 
-    // Step 1: Scrape event details from source
-    const page = await browser.getPage(sourcePlatform);
-    let eventData: {
-      title: string;
-      description: string;
-      dateTime: string;
-      location: string;
-    };
-
-    try {
+    // Scrape event details from source
+    const eventData = await browser.withBrowser(sourcePlatform, async (page) => {
       await page.goto(sourceUrl, { waitUntil: "domcontentloaded" });
       await page.waitForTimeout(3000);
 
       if (sourcePlatform === "meetup") {
-        eventData = await page.evaluate(() => {
+        return page.evaluate(() => {
           const title =
             document.querySelector("h1")?.textContent?.trim() ?? "Untitled";
           const desc =
@@ -80,7 +72,7 @@ export const syncEventTool = {
           return { title, description: desc, dateTime: time, location: venue };
         });
       } else {
-        eventData = await page.evaluate(() => {
+        return page.evaluate(() => {
           const title =
             document.querySelector("h1, [class*='title']")?.textContent?.trim() ?? "Untitled";
           const desc =
@@ -94,11 +86,9 @@ export const syncEventTool = {
           return { title, description: desc, dateTime: time, location: venue };
         });
       }
-    } finally {
-      await page.close();
-    }
+    });
 
-    // Step 2: Return the scraped data for the caller to use with create tools
+    // Return the scraped data for the caller to use with create tools
     // (Rather than duplicating create logic, we return structured data that
     // the LLM can pass to the appropriate create tool)
     return JSON.stringify(
