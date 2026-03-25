@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile, rm } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
+import { Mutex } from "./mutex.js";
 
 /** Directory for persisted sessions and config. */
 const DATA_DIR = join(homedir(), ".events-mcp");
@@ -14,43 +15,6 @@ const PLATFORM_URLS: Record<Platform, string> = {
   meetup: "https://www.meetup.com",
   luma: "https://lu.ma",
 };
-
-/**
- * In-process mutex for serialising browser operations.
- *
- * MCP hosts (e.g. Claude Code) can fire multiple tool calls concurrently.
- * Playwright browser contexts are not safe for concurrent use — simultaneous
- * operations on the same context corrupt state. This mutex ensures only one
- * tool call touches the browser at a time; others queue up and wait.
- *
- * Hat-tip to @m13v's browser-lock for surfacing this concurrency pattern.
- * His implementation uses filesystem locks for cross-process safety; ours
- * is in-process because the MCP server is a single Node process handling
- * serialised stdio, but the principle is identical.
- */
-class BrowserMutex {
-  private queue: Array<() => void> = [];
-  private locked = false;
-
-  /** Acquire the mutex. Resolves when it's your turn. */
-  acquire(): Promise<void> {
-    if (!this.locked) {
-      this.locked = true;
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve) => this.queue.push(resolve));
-  }
-
-  /** Release the mutex, allowing the next waiter to proceed. */
-  release(): void {
-    const next = this.queue.shift();
-    if (next) {
-      next();
-    } else {
-      this.locked = false;
-    }
-  }
-}
 
 /**
  * Manages a shared Playwright browser instance with per-platform
@@ -67,7 +31,7 @@ class BrowserMutex {
 class BrowserManager {
   private browser: Browser | null = null;
   private contexts: Map<Platform, BrowserContext> = new Map();
-  private mutex = new BrowserMutex();
+  private mutex = new Mutex();
   /** Tracks which platforms have been validated this process lifetime. */
   private validated: Set<Platform> = new Set();
 
