@@ -3,36 +3,17 @@ import { browser, type Platform } from "../browser.js";
 
 const PlatformSchema = z.enum(["meetup", "luma"]);
 
-/** Login to a platform, via an interactive session or stored credentials. */
+/** Login to a platform via an interactive browser session. */
 export const loginTool = {
   name: "events_login",
   description:
-    "Log in to Meetup or Luma. By default this opens a browser window for " +
-    "you to sign in (handles OAuth/2FA), then saves the session. Pass " +
-    "automated=true to instead log in headlessly using credentials from the " +
-    "environment (e.g. MEETUP_EMAIL / MEETUP_PASSWORD) — experimental.",
+    "Log in to Meetup or Luma. Opens a browser window for you to sign in " +
+    "(handles OAuth/2FA), then saves the session so you only log in once " +
+    "per platform. Re-run when the session expires.",
   schema: {
     platform: PlatformSchema.describe("Platform to log in to"),
-    automated: z
-      .boolean()
-      .optional()
-      .describe(
-        "Use stored env credentials for a headless, non-interactive login " +
-          "(experimental; falls back to interactive if no credentials)"
-      ),
   },
-  handler: async ({
-    platform,
-    automated,
-  }: {
-    platform: Platform;
-    automated?: boolean;
-  }) => {
-    // Interactive is the default and only auto-path: it's the verified-working
-    // route. Automated credential login is opt-in until it's reliable.
-    if (automated && browser.hasCredentials(platform)) {
-      return await browser.credentialLogin(platform);
-    }
+  handler: async ({ platform }: { platform: Platform }) => {
     return await browser.interactiveLogin(platform);
   },
 };
