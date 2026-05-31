@@ -26,17 +26,6 @@ const LOGIN_HOST: Record<Platform, string> = {
   luma: "lu.ma",
 };
 
-/**
- * Environment variables holding credentials for non-interactive login.
- * Only platforms with a username/password form are listed — Luma uses
- * email magic-links, which can't be automated this way.
- */
-const CREDENTIAL_ENV: Partial<
-  Record<Platform, { email: string; password: string }>
-> = {
-  meetup: { email: "MEETUP_EMAIL", password: "MEETUP_PASSWORD" },
-};
-
 /** Login/signup path segments that mean "definitely not logged in yet". */
 const LOGIN_PATH_RE = /\b(login|signin|sign-in|signup|sign-up)\b/;
 
@@ -302,102 +291,6 @@ class BrowserManager {
       }
     } finally {
       this.mutex.release();
-    }
-  }
-
-  /** Whether non-interactive credentials are configured for a platform. */
-  hasCredentials(platform: Platform): boolean {
-    const env = CREDENTIAL_ENV[platform];
-    return !!(env && process.env[env.email] && process.env[env.password]);
-  }
-
-  /**
-   * Non-interactive login using credentials from the environment
-   * (e.g. MEETUP_EMAIL / MEETUP_PASSWORD). Runs headless so it works from
-   * cron. Fills the platform's own login form — never a third-party OAuth
-   * provider — then waits for the logged-in marker.
-   *
-   * On failure the existing saved session file is left untouched (we only
-   * overwrite it on a confirmed login), so a failed automated attempt never
-   * costs you a working session.
-   */
-  async credentialLogin(platform: Platform): Promise<string> {
-    const env = CREDENTIAL_ENV[platform];
-    if (!env) {
-      return `Automated login isn't supported for ${platform} (no password form). Use interactive login.`;
-    }
-    const email = process.env[env.email];
-    const password = process.env[env.password];
-    if (!email || !password) {
-      return `Set ${env.email} and ${env.password} in the environment to use automated login.`;
-    }
-
-    await this.closeExistingContext(platform);
-
-    const headlessBrowser = await this.launchStealth(true);
-    try {
-      const context = await headlessBrowser.newContext();
-      const page = await context.newPage();
-
-      // Meetup's own email/password form.
-      await page.goto("https://www.meetup.com/login/", {
-        waitUntil: "domcontentloaded",
-      });
-
-      // Dismiss the OneTrust cookie-consent banner if it appears — it can
-      // overlay the form and swallow the submit click.
-      const consent = page.locator("#onetrust-accept-btn-handler");
-      if (await consent.isVisible().catch(() => false)) {
-        await consent.click().catch(() => {});
-        await page.waitForTimeout(500);
-      }
-
-      const emailInput = page
-        .locator('input#email, input[name="email"], input[type="email"]')
-        .first();
-      await emailInput.waitFor({ timeout: 10_000 });
-      await emailInput.fill(email);
-
-      const passwordInput = page
-        .locator(
-          'input#current-password, input[name="current-password"], input[type="password"]',
-        )
-        .first();
-      await passwordInput.fill(password);
-
-      // Submit the email/password form specifically. The page also has
-      // "Log in with Google/Apple/Facebook" buttons whose labels contain
-      // "Log in", so a substring/`.first()` match would hit the Google
-      // button and start an OAuth flow instead. An exact-name match on
-      // "Log in" targets the email submit alone.
-      const submit = page.getByRole("button", { name: "Log in", exact: true });
-      await submit.first().click();
-
-      // Poll for the logged-in marker, handling the post-submit redirect.
-      const deadline = Date.now() + 30_000;
-      let loggedIn = false;
-      while (Date.now() < deadline) {
-        await page.waitForTimeout(1000).catch(() => {});
-        if (await this.pageShowsLoggedIn(page, platform)) {
-          loggedIn = true;
-          break;
-        }
-      }
-
-      if (!loggedIn) {
-        return (
-          "Automated login didn't reach a logged-in state — credentials may " +
-          "be wrong, or Meetup presented a captcha/2FA. Your previous session " +
-          "(if any) is unchanged; try `events login` interactively."
-        );
-      }
-
-      const state = await context.storageState();
-      await writeFile(this.sessionPath(platform), JSON.stringify(state, null, 2));
-      this.validated.delete(platform);
-      return `Logged in to ${platform} via stored credentials. Session saved.`;
-    } finally {
-      await headlessBrowser.close();
     }
   }
 
