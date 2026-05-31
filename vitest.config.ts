@@ -7,12 +7,19 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: [
         "src/**/*.test.ts",
-        "src/index.ts",       // MCP server wiring — no logic to test
+        "src/cli.ts",         // CLI entry/dispatch — covered via args.ts unit tests
         "src/tools/**",       // Playwright automation — needs integration tests
       ],
       thresholds: {
         // Pure logic modules — fully testable
         "src/mutex.ts": {
+          lines: 80,
+          functions: 80,
+          branches: 80,
+          statements: 80,
+        },
+        // CLI argument parsing — pure, schema-driven, fully testable
+        "src/cli/args.ts": {
           lines: 80,
           functions: 80,
           branches: 80,
