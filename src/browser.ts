@@ -17,6 +17,27 @@ const PLATFORM_URLS: Record<Platform, string> = {
 };
 
 /**
+ * The platform's own domain. Used to tell "logged in and back on the
+ * platform" apart from "currently on a third-party OAuth provider"
+ * (e.g. accounts.google.com) during an interactive login.
+ */
+const LOGIN_HOST: Record<Platform, string> = {
+  meetup: "meetup.com",
+  luma: "lu.ma",
+};
+
+/**
+ * Environment variables holding credentials for non-interactive login.
+ * Only platforms with a username/password form are listed — Luma uses
+ * email magic-links, which can't be automated this way.
+ */
+const CREDENTIAL_ENV: Partial<
+  Record<Platform, { email: string; password: string }>
+> = {
+  meetup: { email: "MEETUP_EMAIL", password: "MEETUP_PASSWORD" },
+};
+
+/**
  * Manages a shared Playwright browser instance with per-platform
  * session persistence. Sessions (cookies + localStorage) are saved
  * to disk so users only need to log in once.
@@ -115,17 +136,54 @@ class BrowserManager {
         waitUntil: "domcontentloaded",
         timeout: 5_000,
       });
-
-      let loggedIn: boolean;
-      if (platform === "meetup") {
-        loggedIn = (await page.locator('a[href*="login"]').count()) === 0;
-      } else {
-        loggedIn = (await page.getByText("Sign In").count()) === 0;
-      }
-
+      const loggedIn = await this.pageShowsLoggedIn(page, platform);
       await page.close();
       return loggedIn;
     } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Whether the page *as it currently stands* shows a logged-in state for
+   * the platform. Two conditions, both required:
+   *
+   *  1. We're on the platform's own domain — not a third-party OAuth
+   *     provider. Without this, an in-progress Google/Facebook sign-in
+   *     page (which has no Meetup "login" link) would read as logged in.
+   *  2. The platform's logged-out marker is absent (Meetup shows a login
+   *     link when signed out; Luma shows "Sign In").
+   *
+   * Does not navigate — it inspects whatever the page is showing now, so
+   * callers can poll it during an interactive login.
+   */
+  private async pageShowsLoggedIn(
+    page: Page,
+    platform: Platform,
+  ): Promise<boolean> {
+    let url: URL;
+    try {
+      url = new URL(page.url());
+    } catch {
+      return false;
+    }
+    if (!url.hostname.endsWith(LOGIN_HOST[platform])) return false;
+    // The login/signup page has no logged-out *link* (you're already on it),
+    // so an absence-based check would false-positive there. Being on a login
+    // path is definitionally not-logged-in — guard against it explicitly so a
+    // failed credential login can't be mistaken for success and clobber a
+    // good saved session.
+    if (/\b(login|signin|sign-in|signup|sign-up)\b/.test(url.pathname)) {
+      return false;
+    }
+
+    try {
+      if (platform === "meetup") {
+        return (await page.locator('a[href*="login"]').count()) === 0;
+      }
+      return (await page.getByText("Sign In").count()) === 0;
+    } catch {
+      // Page may be mid-navigation; let the caller poll again.
       return false;
     }
   }
@@ -205,16 +263,25 @@ class BrowserManager {
   }
 
   /**
-   * Open a visible browser for the user to log in manually.
-   * Saves the session once they're done.
+   * Launch a Chrome instance with the automation fingerprint suppressed.
    *
-   * Acquires the mutex before touching the context map so an
-   * in-flight tool call isn't left with a closed context.
-   * The mutex is released before the 5-minute login wait so
-   * other platforms can still be used while the user logs in.
+   * Uses the system-installed Google Chrome (`channel: "chrome"`) and
+   * disables the AutomationControlled blink feature, which together strip
+   * the `navigator.webdriver` signal sites like Google use to reject
+   * automated browsers ("this browser or app may not be secure"). Falls
+   * back to Playwright's bundled Chromium if Chrome isn't installed.
    */
-  async interactiveLogin(platform: Platform): Promise<string> {
-    // Acquire mutex to safely close the existing context
+  private async launchStealth(headless: boolean): Promise<Browser> {
+    const args = ["--disable-blink-features=AutomationControlled"];
+    try {
+      return await chromium.launch({ headless, channel: "chrome", args });
+    } catch {
+      return await chromium.launch({ headless, args });
+    }
+  }
+
+  /** Mutex-guarded teardown of a platform's live context, flushing first. */
+  private async closeExistingContext(platform: Platform): Promise<void> {
     await this.mutex.acquire();
     try {
       const existing = this.contexts.get(platform);
@@ -226,30 +293,151 @@ class BrowserManager {
     } finally {
       this.mutex.release();
     }
+  }
 
-    // Launch a headed (visible) browser for the user to interact with.
-    // This uses a separate browser instance so the mutex isn't needed.
-    const headedBrowser = await chromium.launch({ headless: false });
+  /** Whether non-interactive credentials are configured for a platform. */
+  hasCredentials(platform: Platform): boolean {
+    const env = CREDENTIAL_ENV[platform];
+    return !!(env && process.env[env.email] && process.env[env.password]);
+  }
+
+  /**
+   * Non-interactive login using credentials from the environment
+   * (e.g. MEETUP_EMAIL / MEETUP_PASSWORD). Runs headless so it works from
+   * cron. Fills the platform's own login form — never a third-party OAuth
+   * provider — then waits for the logged-in marker.
+   *
+   * On failure the existing saved session file is left untouched (we only
+   * overwrite it on a confirmed login), so a failed automated attempt never
+   * costs you a working session.
+   */
+  async credentialLogin(platform: Platform): Promise<string> {
+    const env = CREDENTIAL_ENV[platform];
+    if (!env) {
+      return `Automated login isn't supported for ${platform} (no password form). Use interactive login.`;
+    }
+    const email = process.env[env.email];
+    const password = process.env[env.password];
+    if (!email || !password) {
+      return `Set ${env.email} and ${env.password} in the environment to use automated login.`;
+    }
+
+    await this.closeExistingContext(platform);
+
+    const headlessBrowser = await this.launchStealth(true);
+    try {
+      const context = await headlessBrowser.newContext();
+      const page = await context.newPage();
+
+      // Meetup's own email/password form.
+      await page.goto("https://www.meetup.com/login/", {
+        waitUntil: "domcontentloaded",
+      });
+
+      // Dismiss the OneTrust cookie-consent banner if it appears — it can
+      // overlay the form and swallow the submit click.
+      const consent = page.locator("#onetrust-accept-btn-handler");
+      if (await consent.isVisible().catch(() => false)) {
+        await consent.click().catch(() => {});
+        await page.waitForTimeout(500);
+      }
+
+      const emailInput = page
+        .locator('input#email, input[name="email"], input[type="email"]')
+        .first();
+      await emailInput.waitFor({ timeout: 10_000 });
+      await emailInput.fill(email);
+
+      const passwordInput = page
+        .locator(
+          'input#current-password, input[name="current-password"], input[type="password"]',
+        )
+        .first();
+      await passwordInput.fill(password);
+
+      // Submit the email/password form specifically. The page also has
+      // "Log in with Google/Apple/Facebook" buttons whose labels contain
+      // "Log in", so a substring/`.first()` match would hit the Google
+      // button and start an OAuth flow instead. An exact-name match on
+      // "Log in" targets the email submit alone.
+      const submit = page.getByRole("button", { name: "Log in", exact: true });
+      await submit.first().click();
+
+      // Poll for the logged-in marker, handling the post-submit redirect.
+      const deadline = Date.now() + 30_000;
+      let loggedIn = false;
+      while (Date.now() < deadline) {
+        await page.waitForTimeout(1000).catch(() => {});
+        if (await this.pageShowsLoggedIn(page, platform)) {
+          loggedIn = true;
+          break;
+        }
+      }
+
+      if (!loggedIn) {
+        return (
+          "Automated login didn't reach a logged-in state — credentials may " +
+          "be wrong, or Meetup presented a captcha/2FA. Your previous session " +
+          "(if any) is unchanged; try `events login` interactively."
+        );
+      }
+
+      const state = await context.storageState();
+      await writeFile(this.sessionPath(platform), JSON.stringify(state, null, 2));
+      this.validated.delete(platform);
+      return `Logged in to ${platform} via stored credentials. Session saved.`;
+    } finally {
+      await headlessBrowser.close();
+    }
+  }
+
+  /**
+   * Open a visible browser for the user to log in manually.
+   * Saves the session once they're done.
+   *
+   * Acquires the mutex before touching the context map so an
+   * in-flight tool call isn't left with a closed context.
+   * The mutex is released before the 5-minute login wait so
+   * other platforms can still be used while the user logs in.
+   */
+  async interactiveLogin(platform: Platform): Promise<string> {
+    await this.closeExistingContext(platform);
+
+    // Headed (visible) browser the user signs into manually. Separate
+    // instance, so the mutex isn't needed during the long login wait.
+    const headedBrowser = await this.launchStealth(false);
     const context = await headedBrowser.newContext();
     const page = await context.newPage();
 
     await page.goto(PLATFORM_URLS[platform]);
 
-    // Wait for the user to log in — we watch for navigation away from
-    // the login/home page, with a generous timeout
-    const startUrl = page.url();
-    try {
-      await page.waitForFunction(
-        (start: string) => window.location.href !== start,
-        startUrl,
-        { timeout: 300_000 } // 5 minutes to log in
-      );
-      // Give the page a moment to settle after login redirect
-      await page.waitForTimeout(3000);
-    } catch {
-      // Timeout — user might have closed the browser
+    // Wait for the user to *complete* login — i.e. be back on the platform's
+    // own domain with the logged-out marker gone. We poll rather than watch
+    // for "navigated away from start", because an OAuth flow (Sign in with
+    // Google) navigates away immediately to the provider; treating that first
+    // hop as success would save an un-authenticated session and close the
+    // window mid-login. Re-confirm after a short settle so a transient match
+    // during a redirect doesn't fire early.
+    const deadline = Date.now() + 300_000; // 5 minutes to log in
+    let loggedIn = false;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(1000).catch(() => {});
+      if (page.isClosed()) break;
+      if (await this.pageShowsLoggedIn(page, platform)) {
+        await page.waitForTimeout(2000).catch(() => {});
+        if (!page.isClosed() && (await this.pageShowsLoggedIn(page, platform))) {
+          loggedIn = true;
+          break;
+        }
+      }
+    }
+
+    if (!loggedIn) {
       await headedBrowser.close();
-      return "Login timed out. Please try again.";
+      return (
+        "Login not detected within 5 minutes — nothing was saved. " +
+        "Run `events login` again and complete sign-in (including any OAuth/2FA)."
+      );
     }
 
     // Save the authenticated session
