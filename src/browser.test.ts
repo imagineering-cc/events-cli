@@ -40,7 +40,7 @@ vi.mock("fs/promises", () => ({
   rm: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { browser } = await import("./browser.js");
+const { browser, isLoggedInUrl } = await import("./browser.js");
 
 describe("BrowserManager.withBrowser", () => {
   beforeEach(() => {
@@ -111,5 +111,34 @@ describe("BrowserManager.withBrowser", () => {
     // Second call should still work (mutex was released)
     const result = await browser.withBrowser("meetup", async () => "ok");
     expect(result).toBe("ok");
+  });
+});
+
+describe("isLoggedInUrl", () => {
+  it("accepts the platform's own domain off any non-login path", () => {
+    expect(isLoggedInUrl("https://www.meetup.com/home/", "meetup")).toBe(true);
+    expect(isLoggedInUrl("https://www.meetup.com/some-group/events/123/", "meetup")).toBe(true);
+    expect(isLoggedInUrl("https://lu.ma/home", "luma")).toBe(true);
+  });
+
+  it("rejects login/signup paths (the false-positive that clobbered a session)", () => {
+    expect(isLoggedInUrl("https://www.meetup.com/login/", "meetup")).toBe(false);
+    expect(isLoggedInUrl("https://www.meetup.com/signup", "meetup")).toBe(false);
+    expect(isLoggedInUrl("https://lu.ma/signin", "luma")).toBe(false);
+  });
+
+  it("rejects third-party OAuth provider domains mid-sign-in", () => {
+    expect(isLoggedInUrl("https://accounts.google.com/o/oauth2/v2/auth", "meetup")).toBe(false);
+    expect(isLoggedInUrl("https://appleid.apple.com/auth/authorize", "meetup")).toBe(false);
+  });
+
+  it("rejects the wrong platform's domain", () => {
+    expect(isLoggedInUrl("https://lu.ma/home", "meetup")).toBe(false);
+    expect(isLoggedInUrl("https://www.meetup.com/home/", "luma")).toBe(false);
+  });
+
+  it("rejects a malformed URL", () => {
+    expect(isLoggedInUrl("not a url", "meetup")).toBe(false);
+    expect(isLoggedInUrl("", "luma")).toBe(false);
   });
 });

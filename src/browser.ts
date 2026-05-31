@@ -37,6 +37,30 @@ const CREDENTIAL_ENV: Partial<
   meetup: { email: "MEETUP_EMAIL", password: "MEETUP_PASSWORD" },
 };
 
+/** Login/signup path segments that mean "definitely not logged in yet". */
+const LOGIN_PATH_RE = /\b(login|signin|sign-in|signup|sign-up)\b/;
+
+/**
+ * URL-level precondition for a logged-in page: we're on the platform's own
+ * domain (not a third-party OAuth provider mid-sign-in) AND not sitting on a
+ * login/signup path.
+ *
+ * Pure and exported for testing because this is the check whose absence let a
+ * failed credential login read the login page as "logged in" (the login page
+ * has no logged-out *link*) and overwrite a good saved session. The path guard
+ * makes that false-positive impossible.
+ */
+export function isLoggedInUrl(currentUrl: string, platform: Platform): boolean {
+  let url: URL;
+  try {
+    url = new URL(currentUrl);
+  } catch {
+    return false;
+  }
+  if (!url.hostname.endsWith(LOGIN_HOST[platform])) return false;
+  return !LOGIN_PATH_RE.test(url.pathname);
+}
+
 /**
  * Manages a shared Playwright browser instance with per-platform
  * session persistence. Sessions (cookies + localStorage) are saved
@@ -161,21 +185,7 @@ class BrowserManager {
     page: Page,
     platform: Platform,
   ): Promise<boolean> {
-    let url: URL;
-    try {
-      url = new URL(page.url());
-    } catch {
-      return false;
-    }
-    if (!url.hostname.endsWith(LOGIN_HOST[platform])) return false;
-    // The login/signup page has no logged-out *link* (you're already on it),
-    // so an absence-based check would false-positive there. Being on a login
-    // path is definitionally not-logged-in — guard against it explicitly so a
-    // failed credential login can't be mistaken for success and clobber a
-    // good saved session.
-    if (/\b(login|signin|sign-in|signup|sign-up)\b/.test(url.pathname)) {
-      return false;
-    }
+    if (!isLoggedInUrl(page.url(), platform)) return false;
 
     try {
       if (platform === "meetup") {
