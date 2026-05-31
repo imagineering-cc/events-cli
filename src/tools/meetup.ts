@@ -163,6 +163,201 @@ export const meetupCreateEventTool = {
   },
 };
 
+/** Edit an existing Meetup event. */
+export const meetupUpdateEventTool = {
+  name: "meetup_update_event",
+  description:
+    "Edit an existing Meetup event. Only the fields you provide are changed; " +
+    "omit a field to leave it as-is. Requires being logged in as an organizer.",
+  schema: {
+    eventUrl: z.string().describe("Full URL of the Meetup event to edit"),
+    title: z.string().optional().describe("New event title"),
+    description: z
+      .string()
+      .optional()
+      .describe("New event description (supports HTML)"),
+    startDate: z
+      .string()
+      .optional()
+      .describe("New start date/time in ISO 8601 format"),
+    venueName: z
+      .string()
+      .optional()
+      .describe("New venue name to search for"),
+    publish: z
+      .boolean()
+      .optional()
+      .describe("Publish the changes immediately (default: true)"),
+  },
+  handler: async ({
+    eventUrl,
+    title,
+    description,
+    startDate,
+    venueName,
+    publish = true,
+  }: {
+    eventUrl: string;
+    title?: string;
+    description?: string;
+    startDate?: string;
+    venueName?: string;
+    publish?: boolean;
+  }) => {
+    if (!title && !description && !startDate && !venueName) {
+      return "Nothing to update — provide at least one of: title, description, startDate, venueName.";
+    }
+
+    return browser.withBrowser("meetup", async (page) => {
+      // Meetup event edit pages live at .../events/<id>/edit
+      const editUrl = eventUrl.replace(/\/?$/, "/edit/");
+      await page.goto(editUrl, { waitUntil: "domcontentloaded" });
+
+      if (title) {
+        const titleInput = page.locator(
+          'input[name="title"], [data-testid="event-title-input"]'
+        );
+        await titleInput.waitFor({ timeout: 10000 });
+        await titleInput.fill(title);
+      }
+
+      if (description) {
+        const descEditor = page.locator('[contenteditable="true"]').first();
+        if (await descEditor.isVisible().catch(() => false)) {
+          await descEditor.fill(description);
+        }
+      }
+
+      if (startDate) {
+        const date = new Date(startDate);
+        const dateStr = date.toLocaleDateString("en-US", {
+          month: "2-digit",
+          day: "2-digit",
+          year: "numeric",
+        });
+        const timeStr = date.toLocaleTimeString("en-US", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: true,
+        });
+
+        const dateInput = page
+          .locator('input[name="date"], input[type="date"]')
+          .first();
+        if (await dateInput.isVisible().catch(() => false)) {
+          await dateInput.fill(dateStr);
+        }
+
+        const timeInput = page
+          .locator('input[name="startTime"], input[type="time"]')
+          .first();
+        if (await timeInput.isVisible().catch(() => false)) {
+          await timeInput.fill(timeStr);
+        }
+      }
+
+      if (venueName) {
+        const venueInput = page
+          .locator('input[name="venue"], input[placeholder*="venue"]')
+          .first();
+        if (await venueInput.isVisible().catch(() => false)) {
+          await venueInput.fill(venueName);
+          await page.waitForTimeout(1000);
+          const suggestion = page
+            .locator('[role="option"], [data-testid="venue-suggestion"]')
+            .first();
+          if (await suggestion.isVisible().catch(() => false)) {
+            await suggestion.click();
+          }
+        }
+      }
+
+      // Save the changes
+      const saveBtn = page
+        .locator(
+          publish
+            ? 'button:has-text("Publish"), button:has-text("Save")'
+            : 'button:has-text("Save"), button:has-text("Draft")'
+        )
+        .first();
+      if (await saveBtn.isVisible().catch(() => false)) {
+        await saveBtn.click();
+      }
+
+      await page.waitForTimeout(3000);
+
+      return `Event updated: ${page.url()}`;
+    });
+  },
+};
+
+/** Cancel a Meetup event. Destructive — requires explicit confirmation. */
+export const meetupCancelEventTool = {
+  name: "meetup_cancel_event",
+  description:
+    "Cancel an existing Meetup event. This is destructive: attendees are " +
+    "notified and the event is removed from the schedule. You must pass " +
+    "confirm=true to proceed.",
+  schema: {
+    eventUrl: z.string().describe("Full URL of the Meetup event to cancel"),
+    confirm: z
+      .boolean()
+      .describe("Must be true to actually cancel — a safety guard"),
+  },
+  handler: async ({
+    eventUrl,
+    confirm,
+  }: {
+    eventUrl: string;
+    confirm: boolean;
+  }) => {
+    if (!confirm) {
+      return "Refusing to cancel without confirm=true. Re-run with --confirm to proceed.";
+    }
+
+    return browser.withBrowser("meetup", async (page) => {
+      await page.goto(eventUrl, { waitUntil: "domcontentloaded" });
+      await page.waitForTimeout(2000);
+
+      // Open the organizer actions menu, then click Cancel
+      const menuBtn = page
+        .locator(
+          'button[aria-label*="actions"], button[aria-label*="menu"], button:has-text("Edit")'
+        )
+        .first();
+      if (await menuBtn.isVisible().catch(() => false)) {
+        await menuBtn.click();
+        await page.waitForTimeout(500);
+      }
+
+      const cancelBtn = page
+        .locator(
+          'button:has-text("Cancel event"), a:has-text("Cancel event"), [role="menuitem"]:has-text("Cancel")'
+        )
+        .first();
+      if (!(await cancelBtn.isVisible().catch(() => false))) {
+        return "Could not find a 'Cancel event' control on the page — the Meetup UI may have changed. Cancel manually or update the selector.";
+      }
+      await cancelBtn.click();
+      await page.waitForTimeout(500);
+
+      // Confirm in the dialog that follows
+      const confirmBtn = page
+        .locator(
+          'button:has-text("Cancel event"), button:has-text("Confirm"), button:has-text("Yes")'
+        )
+        .last();
+      if (await confirmBtn.isVisible().catch(() => false)) {
+        await confirmBtn.click();
+      }
+
+      await page.waitForTimeout(3000);
+
+      return `Event cancelled: ${eventUrl}`;
+    });
+  },
+};
+
 /** Get RSVPs for a Meetup event. */
 export const meetupGetRsvpsTool = {
   name: "meetup_get_rsvps",

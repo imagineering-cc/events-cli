@@ -1,19 +1,26 @@
 {
-  "name": "events-mcp",
-  "version": "0.1.0",
-  "description": "MCP server for managing Meetup and Luma events via Playwright",
+  "name": "events-cli",
+  "version": "0.2.0",
+  "description": "CLI for managing Meetup and Luma events via Playwright browser automation",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/cli.js",
+  "bin": {
+    "events": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/index.js",
+    "start": "node dist/cli.js",
+    "events": "node dist/cli.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest"
   },
   "keywords": [
-    "mcp",
+    "cli",
     "meetup",
     "luma",
     "events",
@@ -22,7 +29,6 @@
   "author": "imagineering-cc",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
     "playwright": "^1.58.2",
     "zod": "^4.3.6"
   },

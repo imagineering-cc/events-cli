@@ -159,6 +159,202 @@ export const lumaCreateEventTool = {
   },
 };
 
+/** Edit an existing Luma event. */
+export const lumaUpdateEventTool = {
+  name: "luma_update_event",
+  description:
+    "Edit an existing Luma event. Only the fields you provide are changed; " +
+    "omit a field to leave it as-is. Requires being logged in.",
+  schema: {
+    eventUrl: z.string().describe("Full URL of the Luma event to edit"),
+    title: z.string().optional().describe("New event title"),
+    description: z.string().optional().describe("New event description"),
+    startDate: z
+      .string()
+      .optional()
+      .describe("New start date/time in ISO 8601 format"),
+    location: z.string().optional().describe("New venue or location name"),
+  },
+  handler: async ({
+    eventUrl,
+    title,
+    description,
+    startDate,
+    location,
+  }: {
+    eventUrl: string;
+    title?: string;
+    description?: string;
+    startDate?: string;
+    location?: string;
+  }) => {
+    if (!title && !description && !startDate && !location) {
+      return "Nothing to update — provide at least one of: title, description, startDate, location.";
+    }
+
+    return browser.withBrowser("luma", async (page) => {
+      // Luma's manage/edit view for an event. The event page exposes a
+      // "Manage" → "Edit Event" path; navigating to the event then clicking
+      // the edit control is the most resilient route across URL shapes.
+      await page.goto(eventUrl, { waitUntil: "domcontentloaded" });
+      await page.waitForTimeout(2000);
+
+      const editControl = page
+        .locator(
+          'a:has-text("Edit Event"), button:has-text("Edit Event"), a:has-text("Edit"), button:has-text("Edit")'
+        )
+        .first();
+      if (await editControl.isVisible().catch(() => false)) {
+        await editControl.click();
+        await page.waitForTimeout(2000);
+      }
+
+      if (title) {
+        const titleInput = page
+          .locator(
+            'input[placeholder*="Event"], [data-placeholder*="Event"], [contenteditable="true"]'
+          )
+          .first();
+        if (await titleInput.isVisible().catch(() => false)) {
+          await titleInput.fill(title);
+        }
+      }
+
+      if (description) {
+        const descInput = page
+          .locator('[data-placeholder*="description"], [contenteditable="true"]')
+          .nth(1);
+        if (await descInput.isVisible().catch(() => false)) {
+          await descInput.fill(description);
+        }
+      }
+
+      if (startDate) {
+        const startInput = page
+          .locator('input[type="date"], input[name*="start"]')
+          .first();
+        if (await startInput.isVisible().catch(() => false)) {
+          await startInput.fill(startDate.split("T")[0] ?? startDate);
+        }
+        const timeInput = page
+          .locator('input[type="time"], input[name*="time"]')
+          .first();
+        if (await timeInput.isVisible().catch(() => false)) {
+          const time = new Date(startDate).toLocaleTimeString("en-US", {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          });
+          await timeInput.fill(time);
+        }
+      }
+
+      if (location) {
+        const locationInput = page
+          .locator(
+            'input[placeholder*="location"], input[placeholder*="venue"], button:has-text("Add Location")'
+          )
+          .first();
+        if (await locationInput.isVisible().catch(() => false)) {
+          await locationInput.click();
+          await page.waitForTimeout(500);
+          const searchInput = page
+            .locator('input[placeholder*="Search"]')
+            .first();
+          if (await searchInput.isVisible().catch(() => false)) {
+            await searchInput.fill(location);
+            await page.waitForTimeout(1000);
+            const suggestion = page.locator('[role="option"]').first();
+            if (await suggestion.isVisible().catch(() => false)) {
+              await suggestion.click();
+            }
+          }
+        }
+      }
+
+      // Save changes
+      const saveBtn = page
+        .locator(
+          'button:has-text("Save"), button:has-text("Update"), button:has-text("Done")'
+        )
+        .first();
+      if (await saveBtn.isVisible().catch(() => false)) {
+        await saveBtn.click();
+      }
+
+      await page.waitForTimeout(3000);
+
+      return `Event updated on Luma: ${page.url()}`;
+    });
+  },
+};
+
+/** Cancel/delete a Luma event. Destructive — requires explicit confirmation. */
+export const lumaCancelEventTool = {
+  name: "luma_cancel_event",
+  description:
+    "Cancel an existing Luma event. This is destructive: guests are notified " +
+    "and the event is taken down. You must pass confirm=true to proceed.",
+  schema: {
+    eventUrl: z.string().describe("Full URL of the Luma event to cancel"),
+    confirm: z
+      .boolean()
+      .describe("Must be true to actually cancel — a safety guard"),
+  },
+  handler: async ({
+    eventUrl,
+    confirm,
+  }: {
+    eventUrl: string;
+    confirm: boolean;
+  }) => {
+    if (!confirm) {
+      return "Refusing to cancel without confirm=true. Re-run with --confirm to proceed.";
+    }
+
+    return browser.withBrowser("luma", async (page) => {
+      await page.goto(eventUrl, { waitUntil: "domcontentloaded" });
+      await page.waitForTimeout(2000);
+
+      // Luma keeps cancel/delete behind the event's settings/manage area.
+      const manageControl = page
+        .locator(
+          'a:has-text("Manage"), button:has-text("Manage"), a:has-text("Settings"), button:has-text("Settings")'
+        )
+        .first();
+      if (await manageControl.isVisible().catch(() => false)) {
+        await manageControl.click();
+        await page.waitForTimeout(1500);
+      }
+
+      const cancelBtn = page
+        .locator(
+          'button:has-text("Cancel Event"), button:has-text("Delete Event"), a:has-text("Cancel Event")'
+        )
+        .first();
+      if (!(await cancelBtn.isVisible().catch(() => false))) {
+        return "Could not find a 'Cancel Event' control — the Luma UI may have changed. Cancel manually or update the selector.";
+      }
+      await cancelBtn.click();
+      await page.waitForTimeout(500);
+
+      // Confirm in the dialog
+      const confirmBtn = page
+        .locator(
+          'button:has-text("Cancel Event"), button:has-text("Delete"), button:has-text("Confirm"), button:has-text("Yes")'
+        )
+        .last();
+      if (await confirmBtn.isVisible().catch(() => false)) {
+        await confirmBtn.click();
+      }
+
+      await page.waitForTimeout(3000);
+
+      return `Event cancelled on Luma: ${eventUrl}`;
+    });
+  },
+};
+
 /** Get guests/RSVPs for a Luma event. */
 export const lumaGetRsvpsTool = {
   name: "luma_get_rsvps",

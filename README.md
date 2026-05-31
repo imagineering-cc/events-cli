@@ -1,21 +1,29 @@
-# events-mcp
+# events-cli
 
-MCP server providing natural language event management across Meetup and Luma. Uses Playwright browser automation — no paid API tiers required.
+Command-line tool for managing Meetup and Luma events. Uses Playwright browser automation — no paid API tiers required. Designed to be scripted: every operation is a single non-interactive command with predictable flags and exit codes.
 
-## Tools
+## Commands
 
-| Tool | Description |
-|------|-------------|
-| `events_login` | Authenticate with Meetup or Luma (opens browser for OAuth/login) |
-| `events_logout` | Clear saved session for a platform |
-| `events_auth_status` | Check which platforms have active sessions |
-| `meetup_list_events` | List upcoming events from a Meetup group |
-| `meetup_create_event` | Create an event on Meetup |
-| `meetup_get_rsvps` | Get RSVP list for a Meetup event |
-| `luma_list_events` | List upcoming events from Luma |
-| `luma_create_event` | Create an event on Luma |
-| `luma_get_rsvps` | Get guest list for a Luma event |
-| `events_sync` | Copy an event from one platform to the other |
+| Command | Description |
+|---------|-------------|
+| `events login --platform <meetup\|luma>` | Authenticate (opens a browser window to sign in) |
+| `events logout --platform <meetup\|luma>` | Clear the saved session for a platform |
+| `events status [--platform <meetup\|luma>]` | Check which platforms have active sessions |
+| `events meetup-list-events --group-url-name <name>` | List upcoming events from a Meetup group |
+| `events meetup-create-event ...` | Create an event on Meetup |
+| `events meetup-update-event --event-url <url> ...` | Edit an existing Meetup event |
+| `events meetup-cancel-event --event-url <url> --confirm` | Cancel a Meetup event (destructive) |
+| `events meetup-get-rsvps --event-url <url>` | Get the RSVP list for a Meetup event |
+| `events luma-list-events` | List upcoming events from your Luma dashboard |
+| `events luma-create-event ...` | Create an event on Luma |
+| `events luma-update-event --event-url <url> ...` | Edit an existing Luma event |
+| `events luma-cancel-event --event-url <url> --confirm` | Cancel a Luma event (destructive) |
+| `events luma-get-rsvps --event-url <url>` | Get the guest list for a Luma event |
+| `events sync --source-url <url> --target-platform <meetup\|luma>` | Copy an event from one platform to the other |
+
+Short aliases: `login`, `logout`, `status`, `sync`. Both `meetup-create-event` and `meetup_create_event` spellings work.
+
+Run `events help` for the full list, or `events <command> --help` for a command's flags (auto-generated from the underlying schema, so the help is always accurate).
 
 ## Setup
 
@@ -25,50 +33,105 @@ npx playwright install chromium
 npm run build
 ```
 
-Add to your Claude Code MCP config:
+Then either link it onto your `PATH`:
 
-```json
-{
-  "mcpServers": {
-    "events": {
-      "command": "node",
-      "args": ["/absolute/path/to/events-mcp/dist/index.js"]
-    }
-  }
-}
+```bash
+npm link        # makes `events` available globally
+events status
 ```
 
-Then ask Claude to manage your events naturally:
+…or run it in place without linking:
 
-> "Create an event called 'AI Hack Night' next Saturday at 6pm at The Loading Bar"
-> "List my upcoming Meetup events"
-> "Sync my next Meetup event to Luma"
+```bash
+npm start -- status                 # via the start script
+node dist/cli.js status             # directly
+```
+
+## Usage
+
+First, log in once per platform (this opens a real browser window for you to sign in — including any 2FA). The session is saved to `~/.events-mcp/`, so you only do this once:
+
+```bash
+events login --platform meetup
+events login --platform luma
+events status
+```
+
+Then drive events from the command line or a script:
+
+```bash
+# List what's coming up
+events meetup-list-events --group-url-name imagineering-ai-claude-code
+
+# Create a draft (omit --publish to keep it a draft)
+events meetup-create-event \
+  --group-url-name imagineering-ai-claude-code \
+  --title "AI Hack Night" \
+  --description "Bring a laptop and an idea." \
+  --start-date 2026-06-13T18:00:00 \
+  --venue-name "The Loading Bar" \
+  --publish
+
+# Change the time and venue of an existing event — only the flags you pass change
+events meetup-update-event \
+  --event-url https://www.meetup.com/imagineering-ai-claude-code/events/123456789/ \
+  --start-date 2026-06-14T18:00:00 \
+  --venue-name "Fishburners"
+
+# Cancel an event (destructive — requires the explicit guard flag)
+events meetup-cancel-event \
+  --event-url https://www.meetup.com/imagineering-ai-claude-code/events/123456789/ \
+  --confirm
+
+# Mirror a Luma event onto Meetup
+events sync \
+  --source-url https://lu.ma/abc123 \
+  --target-platform meetup \
+  --group-url-name imagineering-ai-claude-code
+```
+
+### Flags, exit codes, and scripting
+
+- **Flags are kebab-case** (`--group-url-name`) and map to the underlying field names; camelCase (`--groupUrlName`) and `--flag=value` are also accepted.
+- **Booleans** are presence flags: `--publish` sets it true, `--no-publish` sets it false.
+- **Exit codes**: `0` success, `1` runtime error (printed to stderr), `2` invalid arguments (usage printed to stderr). This makes the tool safe to chain in scripts with `&&` and to gate on in CI/cron.
+- **Output** goes to stdout; list/RSVP commands emit JSON you can pipe into `jq`.
+
+```bash
+events meetup-get-rsvps --event-url "$URL" | jq '.count'
+```
 
 ## Architecture
 
-**Session persistence** — Browser sessions (cookies, localStorage) are saved to `~/.events-mcp/` so you don't re-authenticate every time.
+The tool is a thin CLI **frontend** over a transport-agnostic command registry. Each operation lives in `src/tools/*.ts` as a plain object — `{ name, description, schema, handler }` — and `src/tools/registry.ts` collects them into one list.
 
-**BrowserMutex** — MCP hosts fire parallel tool calls, but Playwright contexts aren't safe for concurrent use. An in-process mutex serialises all browser operations; others queue and wait.
+**Schema-driven flags** — `src/cli/args.ts` reads each command's zod `schema` and derives its CLI flags: field kinds become flag types, enums become validated choices, optionals become non-required, and `.describe()` text becomes help. There is no hand-written flag table, so flags and validation can never drift from the schema. Adding a new command is a one-file change that automatically gains flags, validation, and `--help`.
 
-**Session validation on first use** — On the first tool call for a platform, the server navigates to the site and checks whether the saved session is still valid. Catches stale tokens early instead of failing mid-operation.
+**Session persistence** — Browser sessions (cookies, localStorage) are saved to `~/.events-mcp/` so you don't re-authenticate every run.
 
-**Safe shutdown** — SIGINT/SIGTERM handlers flush `storageState` before closing the browser, so sessions survive server restarts.
+**BrowserMutex** — An in-process mutex serialises all browser operations so concurrent work can't corrupt the shared Playwright context.
+
+**Session validation on first use** — On the first operation for a platform, the tool loads the site and checks the saved session is still valid, catching stale tokens early instead of failing mid-operation.
+
+**Safe shutdown** — Each command flushes `storageState` and closes the browser before exiting, so sessions survive across invocations.
 
 ## Project structure
 
 ```
 src/
-  index.ts          Server entry, tool registration, lifecycle
+  cli.ts            CLI entry: command dispatch, help, lifecycle
+  cli/
+    args.ts         Schema-driven flag parsing & validation (pure, unit-tested)
+    args.test.ts
   browser.ts        Browser management, session persistence, BrowserMutex
   tools/
+    registry.ts     Collects all tools; command/alias resolution
     auth.ts         Login, logout, status
-    meetup.ts       Meetup event operations
-    luma.ts         Luma event operations
+    meetup.ts       Meetup: list, create, update, cancel, RSVPs
+    luma.ts         Luma: list, create, update, cancel, RSVPs
     sync.ts         Cross-platform sync
 ```
 
-~1,064 lines of TypeScript total.
-
 ## Caveats
 
-Browser automation is inherently fragile. DOM selectors can break when Meetup or Luma update their HTML. If a tool starts failing after working fine, a selector probably needs updating.
+Browser automation is inherently fragile. The create/update/cancel commands drive live Meetup and Luma pages via CSS selectors, which can break when those sites change their HTML. If a command starts failing after working fine, a selector probably needs updating — the `*-create-event`, `*-update-event`, and `*-cancel-event` handlers in `src/tools/` are where to look. The CLI framework (parsing, validation, dispatch) is fully unit-tested and stable; the site selectors are best-effort.
