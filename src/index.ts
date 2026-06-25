@@ -8,12 +8,15 @@ import { loginTool, logoutTool, statusTool } from "./tools/auth.js";
 import {
   meetupListEventsTool,
   meetupCreateEventTool,
+  meetupEditEventTool,
   meetupGetRsvpsTool,
 } from "./tools/meetup.js";
 import {
   lumaListEventsTool,
   lumaCreateEventTool,
+  lumaEditEventTool,
   lumaGetRsvpsTool,
+  lumaChangePhotoTool,
 } from "./tools/luma.js";
 import { syncEventTool } from "./tools/sync.js";
 
@@ -78,6 +81,13 @@ server.tool(
 );
 
 server.tool(
+  meetupEditEventTool.name,
+  meetupEditEventTool.description,
+  meetupEditEventTool.schema,
+  safeHandler(meetupEditEventTool.handler)
+);
+
+server.tool(
   meetupGetRsvpsTool.name,
   meetupGetRsvpsTool.description,
   meetupGetRsvpsTool.schema,
@@ -101,10 +111,24 @@ server.tool(
 );
 
 server.tool(
+  lumaEditEventTool.name,
+  lumaEditEventTool.description,
+  lumaEditEventTool.schema,
+  safeHandler(lumaEditEventTool.handler)
+);
+
+server.tool(
   lumaGetRsvpsTool.name,
   lumaGetRsvpsTool.description,
   lumaGetRsvpsTool.schema,
   safeHandler(lumaGetRsvpsTool.handler)
+);
+
+server.tool(
+  lumaChangePhotoTool.name,
+  lumaChangePhotoTool.description,
+  lumaChangePhotoTool.schema,
+  safeHandler(lumaChangePhotoTool.handler)
 );
 
 // ── Cross-platform tools ────────────────────────────────────────────

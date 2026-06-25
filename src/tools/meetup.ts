@@ -171,6 +171,137 @@ export const meetupCreateEventTool = {
   },
 };
 
+/** Edit an existing event on Meetup. */
+export const meetupEditEventTool = {
+  name: "meetup_edit_event",
+  description:
+    "Edit an existing Meetup event. Only provided fields are updated. Requires being logged in as an organizer.",
+  schema: {
+    eventUrl: z.string().describe("Full URL of the Meetup event to edit"),
+    title: z.string().optional().describe("New event title"),
+    description: z
+      .string()
+      .optional()
+      .describe("New event description (supports HTML)"),
+    startDate: z
+      .string()
+      .optional()
+      .describe("New start date/time in ISO 8601 format"),
+    duration: z.number().optional().describe("New duration in minutes"),
+    venueName: z.string().optional().describe("New venue name to search for"),
+  },
+  handler: async ({
+    eventUrl,
+    title,
+    description,
+    startDate,
+    duration,
+    venueName,
+  }: {
+    eventUrl: string;
+    title?: string;
+    description?: string;
+    startDate?: string;
+    duration?: number;
+    venueName?: string;
+  }) => {
+    const page = await browser.getPage("meetup");
+
+    try {
+      // Navigate to the event's edit page
+      const editUrl = eventUrl.replace(/\/?$/, "/edit/");
+      await page.goto(editUrl, { waitUntil: "domcontentloaded" });
+
+      // Update title if provided
+      if (title !== undefined) {
+        const titleInput = page.locator(
+          'input[name="title"], [data-testid="event-title-input"]'
+        );
+        await titleInput.waitFor({ timeout: 10000 });
+        await titleInput.clear();
+        await titleInput.fill(title);
+      }
+
+      // Update description if provided
+      if (description !== undefined) {
+        const descEditor = page.locator('[contenteditable="true"]').first();
+        await descEditor.waitFor({ timeout: 5000 });
+        await descEditor.fill(description);
+      }
+
+      // Update date/time if provided
+      if (startDate !== undefined) {
+        const date = new Date(startDate);
+        const dateStr = date.toLocaleDateString("en-US", {
+          month: "2-digit",
+          day: "2-digit",
+          year: "numeric",
+        });
+        const timeStr = date.toLocaleTimeString("en-US", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: true,
+        });
+
+        const dateInput = page
+          .locator('input[name="date"], input[type="date"]')
+          .first();
+        if (await dateInput.isVisible().catch(() => false)) {
+          await dateInput.clear();
+          await dateInput.fill(dateStr);
+        }
+
+        const timeInput = page
+          .locator('input[name="startTime"], input[type="time"]')
+          .first();
+        if (await timeInput.isVisible().catch(() => false)) {
+          await timeInput.clear();
+          await timeInput.fill(timeStr);
+        }
+      }
+
+      // Update duration if provided
+      if (duration !== undefined) {
+        const durationSelect = page.locator('select[name="duration"]').first();
+        if (await durationSelect.isVisible().catch(() => false)) {
+          await durationSelect.selectOption(String(duration));
+        }
+      }
+
+      // Update venue if provided
+      if (venueName !== undefined) {
+        const venueInput = page
+          .locator('input[name="venue"], input[placeholder*="venue"]')
+          .first();
+        if (await venueInput.isVisible().catch(() => false)) {
+          await venueInput.clear();
+          await venueInput.fill(venueName);
+          await page.waitForTimeout(1000);
+          const suggestion = page
+            .locator('[role="option"], [data-testid="venue-suggestion"]')
+            .first();
+          if (await suggestion.isVisible().catch(() => false)) {
+            await suggestion.click();
+          }
+        }
+      }
+
+      // Save changes
+      const saveBtn = page
+        .locator('button:has-text("Save"), button:has-text("Update")')
+        .first();
+      await saveBtn.click();
+
+      await page.waitForTimeout(3000);
+
+      const finalUrl = page.url();
+      return `Event updated: ${finalUrl}`;
+    } finally {
+      await page.close();
+    }
+  },
+};
+
 /** Get RSVPs for a Meetup event. */
 export const meetupGetRsvpsTool = {
   name: "meetup_get_rsvps",
